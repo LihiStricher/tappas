@@ -85,6 +85,7 @@ enum class ArgumentType {
     PrintFPS,
     PrintLatency,
     Timeout,
+    Config,
     Error
 };
 
@@ -99,7 +100,8 @@ cxxopts::Options build_arg_parser()
   ("h,help", "Show this help")
   ("t,timeout", "Time to run", cxxopts::value<int>()->default_value("60"))
   ("f,print-fps", "Print FPS",  cxxopts::value<bool>()->default_value("false"))
-  ("l, print-latency", "Print Latency", cxxopts::value<bool>()->default_value("false"));
+  ("l, print-latency", "Print Latency", cxxopts::value<bool>()->default_value("false"))
+  ("c, config-file-path", "Frontend Configuration Path", cxxopts::value<std::string>()->default_value(FRONTEND_CONFIG_FILE));
   return options;
 }
 
@@ -121,6 +123,10 @@ std::vector<ArgumentType> handle_arguments(const cxxopts::ParseResult &result, c
 
     if (result.count("print-latency")) {
         arguments.push_back(ArgumentType::PrintLatency);
+    }
+
+    if (result.count("config-file-path")) {
+        arguments.push_back(ArgumentType::Config);
     }
 
     // Handle unrecognized options
@@ -147,6 +153,7 @@ struct AppResources
     PipelinePtr pipeline;
     bool print_fps;
     bool print_latency;
+    std::string frontend_config;
 };
 
 inline std::string get_encoder_osd_config_file(const std::string &id)
@@ -204,13 +211,11 @@ void subscribe_elements(std::shared_ptr<AppResources> app_resources)
         if (s.id == AI_SINK)
         {
             std::cout << "subscribing ai pipeline to frontend for '" << s.id << "'" << std::endl;
-            // app_resources->pipeline->get_stage_by_name(TILLING_STAGE)->add_queue(s.id);
-            app_resources->pipeline->get_stage_by_name(CLIP_AI_STAGE)->add_queue(s.id);
+            app_resources->pipeline->get_stage_by_name(TILLING_STAGE)->add_queue(s.id);
             fe_callbacks[s.id] = [s, app_resources](HailoMediaLibraryBufferPtr buffer, size_t size)
             {
                 BufferPtr wrapped_buffer = std::make_shared<Buffer>(buffer);
-                // app_resources->pipeline->get_stage_by_name(TILLING_STAGE)->push(wrapped_buffer, s.id);
-                app_resources->pipeline->get_stage_by_name(CLIP_AI_STAGE)->push(wrapped_buffer, s.id);
+                app_resources->pipeline->get_stage_by_name(TILLING_STAGE)->push(wrapped_buffer, s.id);
             };
         }
         else if (s.id == AI_VISION_SINK)
@@ -220,8 +225,7 @@ void subscribe_elements(std::shared_ptr<AppResources> app_resources)
             fe_callbacks[s.id] = [s, app_resources, agg_stage](HailoMediaLibraryBufferPtr buffer, size_t size)
             {                      
                 BufferPtr wrapped_buffer = std::make_shared<Buffer>(buffer);
-                CroppingMetadataPtr cropping_meta = std::make_shared<CroppingMetadata>(1);
-                // CroppingMetadataPtr cropping_meta = std::make_shared<CroppingMetadata>(TILES.size());
+                CroppingMetadataPtr cropping_meta = std::make_shared<CroppingMetadata>(TILES.size());
                 wrapped_buffer->add_metadata(cropping_meta);
                 agg_stage->push(wrapped_buffer, s.id);
             };
@@ -312,7 +316,7 @@ void create_encoder_and_output_file(const std::string& id, std::shared_ptr<AppRe
 void configure_frontend_and_encoders(std::shared_ptr<AppResources> app_resources)
 {
     // Create and configure frontend
-    std::string frontend_config_string = read_string_from_file(FRONTEND_CONFIG_FILE);
+    std::string frontend_config_string = read_string_from_file(app_resources->frontend_config.c_str());
     tl::expected<MediaLibraryFrontendPtr, media_library_return> frontend_expected = MediaLibraryFrontend::create(FRONTEND_SRC_ELEMENT_V4L2SRC, frontend_config_string);
     if (!frontend_expected.has_value())
     {
@@ -423,56 +427,56 @@ void create_pipeline(std::shared_ptr<AppResources> app_resources)
     app_resources->pipeline = std::make_shared<Pipeline>();
 
     // Create pipeline stages
-    // std::shared_ptr<TillingCropStage> tilling_stage = std::make_shared<TillingCropStage>(TILLING_STAGE,40, TILLING_INPUT_WIDTH, TILLING_INPUT_HEIGHT,
-    //                                                                                     TILLING_OUTPUT_WIDTH, TILLING_OUTPUT_HEIGHT,
-    //                                                                                     "", DETECTION_AI_STAGE, TILES,
-    //                                                                                     5, false, app_resources->print_fps);
-    // std::shared_ptr<HailortAsyncStage> detection_stage = std::make_shared<HailortAsyncStage>(DETECTION_AI_STAGE, YOLO_HEF_FILE, 5, 50 ,"device0", 10, 8, std::chrono::milliseconds(100), app_resources->print_fps);
-    // std::shared_ptr<PostprocessStage> detection_post_stage = std::make_shared<PostprocessStage>(POST_STAGE, YOLO_POST_SO, YOLO_FUNC_NAME, "", 5, false, app_resources->print_fps);
+    std::shared_ptr<TillingCropStage> tilling_stage = std::make_shared<TillingCropStage>(TILLING_STAGE,40, TILLING_INPUT_WIDTH, TILLING_INPUT_HEIGHT,
+                                                                                        TILLING_OUTPUT_WIDTH, TILLING_OUTPUT_HEIGHT,
+                                                                                        "", DETECTION_AI_STAGE, TILES,
+                                                                                        5, false, app_resources->print_fps);
+    std::shared_ptr<HailortAsyncStage> detection_stage = std::make_shared<HailortAsyncStage>(DETECTION_AI_STAGE, YOLO_HEF_FILE, 5, 50 ,"device0", 10, 8, std::chrono::milliseconds(100), app_resources->print_fps);
+    std::shared_ptr<PostprocessStage> detection_post_stage = std::make_shared<PostprocessStage>(POST_STAGE, YOLO_POST_SO, YOLO_FUNC_NAME, "", 5, false, app_resources->print_fps);
     std::shared_ptr<AggregatorStage> agg_stage = std::make_shared<AggregatorStage>(AGGREGATOR_STAGE, false, 
                                                                                    AI_VISION_SINK, 2, 
                                                                                    POST_STAGE, 10, 
                                                                                    true, 0.3, 0.1,
                                                                                    false, app_resources->print_fps);
-    // std::shared_ptr<TrackerStage> tracker_stage = std::make_shared<TrackerStage>(TRACKER_STAGE, 1, false, -1, app_resources->print_fps);
-    // std::shared_ptr<BBoxCropStage> bbox_crop_stage = std::make_shared<BBoxCropStage>(BBOX_CROP_STAGE, 100, BBOX_CROP_INPUT_WIDTH, BBOX_CROP_INPUT_HEIGHT,
-    //                                                                                 BBOX_CROP_OUTPUT_WIDTH, BBOX_CROP_OUTPUT_HEIGHT,
-    //                                                                                 AGGREGATOR_STAGE_2, CLIP_AI_STAGE, BBOX_CROP_LABEL, 1, false, app_resources->print_fps);
-    std::shared_ptr<HailortAsyncStage> clip_stage = std::make_shared<HailortAsyncStage>(CLIP_AI_STAGE, CLIP_HEF_FILE, 50, 101 ,"device0", 1, 1, std::chrono::milliseconds(100), app_resources->print_fps);
+    std::shared_ptr<TrackerStage> tracker_stage = std::make_shared<TrackerStage>(TRACKER_STAGE, 1, false, -1, app_resources->print_fps);
+    std::shared_ptr<BBoxCropStage> bbox_crop_stage = std::make_shared<BBoxCropStage>(BBOX_CROP_STAGE, 100, BBOX_CROP_INPUT_WIDTH, BBOX_CROP_INPUT_HEIGHT,
+                                                                                    BBOX_CROP_OUTPUT_WIDTH, BBOX_CROP_OUTPUT_HEIGHT,
+                                                                                    AGGREGATOR_STAGE_2, CLIP_AI_STAGE, BBOX_CROP_LABEL, 1, false, app_resources->print_fps);
+    std::shared_ptr<HailortAsyncStage> clip_stage = std::make_shared<HailortAsyncStage>(CLIP_AI_STAGE, CLIP_HEF_FILE, 20, 101 ,"device0", 1, 1, std::chrono::milliseconds(100), app_resources->print_fps);
     std::shared_ptr<PostprocessStage> clip_post_stage = std::make_shared<PostprocessStage>(CLIP_POST_STAGE, CLIP_POST_SO, CLIP_FUNC_NAME, "", 50, false, app_resources->print_fps);
-    // std::shared_ptr<AggregatorStage> agg_stage_2 = std::make_shared<AggregatorStage>(AGGREGATOR_STAGE_2, false, 
-    //                                                                                  BBOX_CROP_STAGE, 2, 
-    //                                                                                  CLIP_POST_STAGE, 30,
-    //                                                                                  false, 0.3, 0.1,
-    //                                                                                  false, app_resources->print_fps);
-    // std::shared_ptr<OverlayStage> overlay_stage = std::make_shared<OverlayStage>(OVERLAY_STAGE, 1, false, app_resources->print_fps);
+    std::shared_ptr<AggregatorStage> agg_stage_2 = std::make_shared<AggregatorStage>(AGGREGATOR_STAGE_2, false, 
+                                                                                     BBOX_CROP_STAGE, 2, 
+                                                                                     CLIP_POST_STAGE, 30,
+                                                                                     false, 0.3, 0.1,
+                                                                                     false, app_resources->print_fps);
+    std::shared_ptr<OverlayStage> overlay_stage = std::make_shared<OverlayStage>(OVERLAY_STAGE, 1, false, app_resources->print_fps);
     std::shared_ptr<CallbackStage> sink_stage = std::make_shared<CallbackStage>(AI_CALLBACK_STAGE, 1, false);
     
     // Add stages to pipeline
-    // app_resources->pipeline->add_stage(tilling_stage);
-    // app_resources->pipeline->add_stage(detection_stage);
-    // app_resources->pipeline->add_stage(detection_post_stage);
+    app_resources->pipeline->add_stage(tilling_stage);
+    app_resources->pipeline->add_stage(detection_stage);
+    app_resources->pipeline->add_stage(detection_post_stage);
     app_resources->pipeline->add_stage(agg_stage);
-    // app_resources->pipeline->add_stage(tracker_stage);
-    // app_resources->pipeline->add_stage(bbox_crop_stage);
-    // app_resources->pipeline->add_stage(agg_stage_2);
-    // app_resources->pipeline->add_stage(overlay_stage);
+    app_resources->pipeline->add_stage(tracker_stage);
+    app_resources->pipeline->add_stage(bbox_crop_stage);
+    app_resources->pipeline->add_stage(agg_stage_2);
+    app_resources->pipeline->add_stage(overlay_stage);
     app_resources->pipeline->add_stage(sink_stage);
     app_resources->pipeline->add_stage(clip_stage);
     app_resources->pipeline->add_stage(clip_post_stage);
 
     // Subscribe stages to each other
-    // tilling_stage->add_subscriber(detection_stage);
-    // detection_stage->add_subscriber(detection_post_stage);
-    // detection_post_stage->add_subscriber(agg_stage);
-    // tracker_stage->add_subscriber(bbox_crop_stage);
-    // bbox_crop_stage->add_subscriber(agg_stage_2);
-    // bbox_crop_stage->add_subscriber(clip_stage);
+    tilling_stage->add_subscriber(detection_stage);
+    detection_stage->add_subscriber(detection_post_stage);
+    detection_post_stage->add_subscriber(agg_stage);
+    agg_stage->add_subscriber(tracker_stage);
+    tracker_stage->add_subscriber(bbox_crop_stage);
+    bbox_crop_stage->add_subscriber(agg_stage_2);
+    bbox_crop_stage->add_subscriber(clip_stage);
     clip_stage->add_subscriber(clip_post_stage);
-    // clip_post_stage->add_subscriber(agg_stage_2);
-    // agg_stage_2->add_subscriber(overlay_stage);
-    agg_stage->add_subscriber(sink_stage);
-    clip_post_stage->add_subscriber(agg_stage);
+    clip_post_stage->add_subscriber(agg_stage_2);
+    agg_stage_2->add_subscriber(overlay_stage);
+    overlay_stage->add_subscriber(sink_stage);
 }
 
 //TODO: add a documention for this function
@@ -507,7 +511,6 @@ void zmq_subscriber_thread(std::shared_ptr<AppResources>  app_resources)
     }
 }
 
-
 /**
  * @brief Main function to initialize and run the application.
  *
@@ -523,6 +526,7 @@ int main(int argc, char *argv[])
 {
     // App resources 
     std::shared_ptr<AppResources> app_resources = std::make_shared<AppResources>();
+    app_resources->frontend_config = FRONTEND_CONFIG_FILE;
 
     // register signal SIGINT and signal handler
     signal_utils::register_signal_handler([app_resources](int signal)
@@ -554,6 +558,9 @@ int main(int argc, char *argv[])
         case ArgumentType::PrintLatency:
             app_resources->print_latency = true;
             break;
+        case ArgumentType::Config:
+            app_resources->frontend_config = result["config-file-path"].as<std::string>();
+            break;
         case ArgumentType::Error:
             return 1;
         }
@@ -571,13 +578,15 @@ int main(int argc, char *argv[])
     // Start pipeline
     start_app(app_resources);
 
+    std::cout << "Using frontend config: " << app_resources->frontend_config << std::endl;
+
     std::thread zmq_thread(zmq_subscriber_thread, std::ref(app_resources));
     zmq_thread.detach();
 
     std::cout << "Started playing for " << timeout << " seconds." << std::endl;
 
     // Wait
-    std::this_thread::sleep_for(std::chrono::minutes(5));
+    std::this_thread::sleep_for(std::chrono::seconds(timeout));
 
     // Stop pipeline
     stop_app(app_resources);

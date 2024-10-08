@@ -392,9 +392,10 @@ overlay_status_t draw_all(HailoMat &hmat, HailoROIPtr roi, float landmark_point_
                 auto text_position = cv::Point(rect.x - log(rect.width), rect.y - log(rect.width));
                 float font_scale = TEXT_FONT_FACTOR * log(rect.width);
                 hmat.draw_text(text, text_position, font_scale, color);
+                
+                // Draw inner objects.
+                ret = draw_all(hmat, detection, landmark_point_radius, show_confidence, local_gallery, mask_overlay_n_threads);
             }
-            // Draw inner objects.
-            ret = draw_all(hmat, detection, landmark_point_radius, show_confidence, local_gallery, mask_overlay_n_threads);
             break;
         }
         case HAILO_CLASSIFICATION:
