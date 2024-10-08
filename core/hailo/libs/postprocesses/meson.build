@@ -327,7 +327,24 @@ shared_library('face_recognition_post',
     install_dir: post_proc_install_dir,
 )
 
+################################################
+# CLIP SOURCES
+################################################
+clip_sources = [
+    'clip/clip.cpp',
+]
 
+zmq_dep = dependency('libzmq', method : 'pkg-config')
+
+shared_library('clip_post',
+    clip_sources,
+    cpp_args : hailo_lib_args,
+    include_directories: [hailo_general_inc, include_directories('./')] + xtensor_inc,
+    dependencies : post_deps + [tracker_dep, zmq_dep],
+    gnu_symbol_visibility : 'default',
+    install: true,
+    install_dir: post_proc_install_dir,
+)
 
 if get_option('include_python')
     

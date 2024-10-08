@@ -24,6 +24,7 @@
 #include "infra/udp_stage.hpp"
 #include "infra/tracker_stage.hpp"
 #include "infra/aggregator_stage.hpp"
+#include <zmq.hpp>
 
 #define FRONTEND_CONFIG_FILE "/home/root/apps/ai_example_app/resources/configs/frontend_config.json"
 #define ENCODER_OSD_CONFIG_FILE(id) get_encoder_osd_config_file(id)
@@ -62,19 +63,19 @@ std::vector<HailoBBox> TILES = {{0.0,0.0,0.6,0.6},  {0.4,0,0.6,0.6},
 
 // Bbox crop Parms
 #define BBOX_CROP_STAGE "bbox_crops"
-#define BBOX_CROP_LABEL "face"
+#define BBOX_CROP_LABEL "person"
 #define BBOX_CROP_INPUT_WIDTH 3840
 #define BBOX_CROP_INPUT_HEIGHT 2160
-#define BBOX_CROP_OUTPUT_WIDTH 120
-#define BBOX_CROP_OUTPUT_HEIGHT 120
+#define BBOX_CROP_OUTPUT_WIDTH 224
+#define BBOX_CROP_OUTPUT_HEIGHT 224
 
-// Landmarks AI Params
-#define LANDMARKS_HEF_FILE "/home/root/apps/ai_example_app/resources/tddfa_mobilenet_v1_nv12.hef"
-#define LANDMARKS_AI_STAGE "face_landmarks"
-// Landmarks Postprocess Params
-#define LANDMARKS_POST_STAGE "landmarks_post"
-#define LANDMARKS_POST_SO "/usr/lib/hailo-post-processes/libfacial_landmarks_post.so"
-#define LANDMARKS_FUNC_NAME "facial_landmarks_nv12"
+// CLIP AI Params
+#define CLIP_HEF_FILE "/home/root/apps/ai_example_app/resources/clip_resnet_50_nv12.hef"
+#define CLIP_AI_STAGE "clip"
+// Clip Postprocess Params
+#define CLIP_POST_STAGE "clip_post"
+#define CLIP_POST_SO "/usr/lib/hailo-post-processes/libclip_post.so"
+#define CLIP_FUNC_NAME "clip_resnet_50_nv12"
 
 // Macro that turns coverts stream ids to port #s
 #define PORT_FROM_ID(id) std::to_string(5000 + std::stoi(id.substr(4)) * 2)
@@ -84,7 +85,6 @@ enum class ArgumentType {
     PrintFPS,
     PrintLatency,
     Timeout,
-    Config,
     Error
 };
 
@@ -99,8 +99,7 @@ cxxopts::Options build_arg_parser()
   ("h,help", "Show this help")
   ("t,timeout", "Time to run", cxxopts::value<int>()->default_value("60"))
   ("f,print-fps", "Print FPS",  cxxopts::value<bool>()->default_value("false"))
-  ("l, print-latency", "Print Latency", cxxopts::value<bool>()->default_value("false"))
-  ("c, config-file-path", "Frontend Configuration Path", cxxopts::value<std::string>()->default_value(FRONTEND_CONFIG_FILE));
+  ("l, print-latency", "Print Latency", cxxopts::value<bool>()->default_value("false"));
   return options;
 }
 
@@ -122,10 +121,6 @@ std::vector<ArgumentType> handle_arguments(const cxxopts::ParseResult &result, c
 
     if (result.count("print-latency")) {
         arguments.push_back(ArgumentType::PrintLatency);
-    }
-
-    if (result.count("config-file-path")) {
-        arguments.push_back(ArgumentType::Config);
     }
 
     // Handle unrecognized options
@@ -152,7 +147,6 @@ struct AppResources
     PipelinePtr pipeline;
     bool print_fps;
     bool print_latency;
-    std::string frontend_config;
 };
 
 inline std::string get_encoder_osd_config_file(const std::string &id)
@@ -210,11 +204,13 @@ void subscribe_elements(std::shared_ptr<AppResources> app_resources)
         if (s.id == AI_SINK)
         {
             std::cout << "subscribing ai pipeline to frontend for '" << s.id << "'" << std::endl;
-            app_resources->pipeline->get_stage_by_name(TILLING_STAGE)->add_queue(s.id);
+            // app_resources->pipeline->get_stage_by_name(TILLING_STAGE)->add_queue(s.id);
+            app_resources->pipeline->get_stage_by_name(CLIP_AI_STAGE)->add_queue(s.id);
             fe_callbacks[s.id] = [s, app_resources](HailoMediaLibraryBufferPtr buffer, size_t size)
             {
                 BufferPtr wrapped_buffer = std::make_shared<Buffer>(buffer);
-                app_resources->pipeline->get_stage_by_name(TILLING_STAGE)->push(wrapped_buffer, s.id);
+                // app_resources->pipeline->get_stage_by_name(TILLING_STAGE)->push(wrapped_buffer, s.id);
+                app_resources->pipeline->get_stage_by_name(CLIP_AI_STAGE)->push(wrapped_buffer, s.id);
             };
         }
         else if (s.id == AI_VISION_SINK)
@@ -224,7 +220,8 @@ void subscribe_elements(std::shared_ptr<AppResources> app_resources)
             fe_callbacks[s.id] = [s, app_resources, agg_stage](HailoMediaLibraryBufferPtr buffer, size_t size)
             {                      
                 BufferPtr wrapped_buffer = std::make_shared<Buffer>(buffer);
-                CroppingMetadataPtr cropping_meta = std::make_shared<CroppingMetadata>(TILES.size());
+                CroppingMetadataPtr cropping_meta = std::make_shared<CroppingMetadata>(1);
+                // CroppingMetadataPtr cropping_meta = std::make_shared<CroppingMetadata>(TILES.size());
                 wrapped_buffer->add_metadata(cropping_meta);
                 agg_stage->push(wrapped_buffer, s.id);
             };
@@ -315,7 +312,7 @@ void create_encoder_and_output_file(const std::string& id, std::shared_ptr<AppRe
 void configure_frontend_and_encoders(std::shared_ptr<AppResources> app_resources)
 {
     // Create and configure frontend
-    std::string frontend_config_string = read_string_from_file(app_resources->frontend_config.c_str());
+    std::string frontend_config_string = read_string_from_file(FRONTEND_CONFIG_FILE);
     tl::expected<MediaLibraryFrontendPtr, media_library_return> frontend_expected = MediaLibraryFrontend::create(FRONTEND_SRC_ELEMENT_V4L2SRC, frontend_config_string);
     if (!frontend_expected.has_value())
     {
@@ -426,57 +423,91 @@ void create_pipeline(std::shared_ptr<AppResources> app_resources)
     app_resources->pipeline = std::make_shared<Pipeline>();
 
     // Create pipeline stages
-    std::shared_ptr<TillingCropStage> tilling_stage = std::make_shared<TillingCropStage>(TILLING_STAGE,40, TILLING_INPUT_WIDTH, TILLING_INPUT_HEIGHT,
-                                                                                        TILLING_OUTPUT_WIDTH, TILLING_OUTPUT_HEIGHT,
-                                                                                        "", DETECTION_AI_STAGE, TILES,
-                                                                                        5, false, app_resources->print_fps);
-    std::shared_ptr<HailortAsyncStage> detection_stage = std::make_shared<HailortAsyncStage>(DETECTION_AI_STAGE, YOLO_HEF_FILE, 5, 50 ,"device0", 10, 8, std::chrono::milliseconds(100), app_resources->print_fps);
-    std::shared_ptr<PostprocessStage> detection_post_stage = std::make_shared<PostprocessStage>(POST_STAGE, YOLO_POST_SO, YOLO_FUNC_NAME, "", 5, false, app_resources->print_fps);
+    // std::shared_ptr<TillingCropStage> tilling_stage = std::make_shared<TillingCropStage>(TILLING_STAGE,40, TILLING_INPUT_WIDTH, TILLING_INPUT_HEIGHT,
+    //                                                                                     TILLING_OUTPUT_WIDTH, TILLING_OUTPUT_HEIGHT,
+    //                                                                                     "", DETECTION_AI_STAGE, TILES,
+    //                                                                                     5, false, app_resources->print_fps);
+    // std::shared_ptr<HailortAsyncStage> detection_stage = std::make_shared<HailortAsyncStage>(DETECTION_AI_STAGE, YOLO_HEF_FILE, 5, 50 ,"device0", 10, 8, std::chrono::milliseconds(100), app_resources->print_fps);
+    // std::shared_ptr<PostprocessStage> detection_post_stage = std::make_shared<PostprocessStage>(POST_STAGE, YOLO_POST_SO, YOLO_FUNC_NAME, "", 5, false, app_resources->print_fps);
     std::shared_ptr<AggregatorStage> agg_stage = std::make_shared<AggregatorStage>(AGGREGATOR_STAGE, false, 
                                                                                    AI_VISION_SINK, 2, 
                                                                                    POST_STAGE, 10, 
                                                                                    true, 0.3, 0.1,
                                                                                    false, app_resources->print_fps);
-    std::shared_ptr<TrackerStage> tracker_stage = std::make_shared<TrackerStage>(TRACKER_STAGE, 1, false, -1, app_resources->print_fps);
-    std::shared_ptr<BBoxCropStage> bbox_crop_stage = std::make_shared<BBoxCropStage>(BBOX_CROP_STAGE, 100, BBOX_CROP_INPUT_WIDTH, BBOX_CROP_INPUT_HEIGHT,
-                                                                                    BBOX_CROP_OUTPUT_WIDTH, BBOX_CROP_OUTPUT_HEIGHT,
-                                                                                    AGGREGATOR_STAGE_2, LANDMARKS_AI_STAGE, BBOX_CROP_LABEL, 1, false, app_resources->print_fps);
-    std::shared_ptr<HailortAsyncStage> landmarks_stage = std::make_shared<HailortAsyncStage>(LANDMARKS_AI_STAGE, LANDMARKS_HEF_FILE, 20, 101 ,"device0", 1, 1, std::chrono::milliseconds(100), app_resources->print_fps);
-    std::shared_ptr<PostprocessStage> landmarks_post_stage = std::make_shared<PostprocessStage>(LANDMARKS_POST_STAGE, LANDMARKS_POST_SO, LANDMARKS_FUNC_NAME, "", 50, false, app_resources->print_fps);
-    std::shared_ptr<AggregatorStage> agg_stage_2 = std::make_shared<AggregatorStage>(AGGREGATOR_STAGE_2, false, 
-                                                                                     BBOX_CROP_STAGE, 2, 
-                                                                                     LANDMARKS_POST_STAGE, 30,
-                                                                                     false, 0.3, 0.1,
-                                                                                     false, app_resources->print_fps);
-    std::shared_ptr<OverlayStage> overlay_stage = std::make_shared<OverlayStage>(OVERLAY_STAGE, 1, false, app_resources->print_fps);
+    // std::shared_ptr<TrackerStage> tracker_stage = std::make_shared<TrackerStage>(TRACKER_STAGE, 1, false, -1, app_resources->print_fps);
+    // std::shared_ptr<BBoxCropStage> bbox_crop_stage = std::make_shared<BBoxCropStage>(BBOX_CROP_STAGE, 100, BBOX_CROP_INPUT_WIDTH, BBOX_CROP_INPUT_HEIGHT,
+    //                                                                                 BBOX_CROP_OUTPUT_WIDTH, BBOX_CROP_OUTPUT_HEIGHT,
+    //                                                                                 AGGREGATOR_STAGE_2, CLIP_AI_STAGE, BBOX_CROP_LABEL, 1, false, app_resources->print_fps);
+    std::shared_ptr<HailortAsyncStage> clip_stage = std::make_shared<HailortAsyncStage>(CLIP_AI_STAGE, CLIP_HEF_FILE, 50, 101 ,"device0", 1, 1, std::chrono::milliseconds(100), app_resources->print_fps);
+    std::shared_ptr<PostprocessStage> clip_post_stage = std::make_shared<PostprocessStage>(CLIP_POST_STAGE, CLIP_POST_SO, CLIP_FUNC_NAME, "", 50, false, app_resources->print_fps);
+    // std::shared_ptr<AggregatorStage> agg_stage_2 = std::make_shared<AggregatorStage>(AGGREGATOR_STAGE_2, false, 
+    //                                                                                  BBOX_CROP_STAGE, 2, 
+    //                                                                                  CLIP_POST_STAGE, 30,
+    //                                                                                  false, 0.3, 0.1,
+    //                                                                                  false, app_resources->print_fps);
+    // std::shared_ptr<OverlayStage> overlay_stage = std::make_shared<OverlayStage>(OVERLAY_STAGE, 1, false, app_resources->print_fps);
     std::shared_ptr<CallbackStage> sink_stage = std::make_shared<CallbackStage>(AI_CALLBACK_STAGE, 1, false);
     
     // Add stages to pipeline
-    app_resources->pipeline->add_stage(tilling_stage);
-    app_resources->pipeline->add_stage(detection_stage);
-    app_resources->pipeline->add_stage(detection_post_stage);
+    // app_resources->pipeline->add_stage(tilling_stage);
+    // app_resources->pipeline->add_stage(detection_stage);
+    // app_resources->pipeline->add_stage(detection_post_stage);
     app_resources->pipeline->add_stage(agg_stage);
-    app_resources->pipeline->add_stage(tracker_stage);
-    app_resources->pipeline->add_stage(bbox_crop_stage);
-    app_resources->pipeline->add_stage(agg_stage_2);
-    app_resources->pipeline->add_stage(overlay_stage);
+    // app_resources->pipeline->add_stage(tracker_stage);
+    // app_resources->pipeline->add_stage(bbox_crop_stage);
+    // app_resources->pipeline->add_stage(agg_stage_2);
+    // app_resources->pipeline->add_stage(overlay_stage);
     app_resources->pipeline->add_stage(sink_stage);
-    app_resources->pipeline->add_stage(landmarks_stage);
-    app_resources->pipeline->add_stage(landmarks_post_stage);
+    app_resources->pipeline->add_stage(clip_stage);
+    app_resources->pipeline->add_stage(clip_post_stage);
 
     // Subscribe stages to each other
-    tilling_stage->add_subscriber(detection_stage);
-    detection_stage->add_subscriber(detection_post_stage);
-    detection_post_stage->add_subscriber(agg_stage);
-    agg_stage->add_subscriber(tracker_stage);
-    tracker_stage->add_subscriber(bbox_crop_stage);
-    bbox_crop_stage->add_subscriber(agg_stage_2);
-    bbox_crop_stage->add_subscriber(landmarks_stage);
-    landmarks_stage->add_subscriber(landmarks_post_stage);
-    landmarks_post_stage->add_subscriber(agg_stage_2);
-    agg_stage_2->add_subscriber(overlay_stage);
-    overlay_stage->add_subscriber(sink_stage);
+    // tilling_stage->add_subscriber(detection_stage);
+    // detection_stage->add_subscriber(detection_post_stage);
+    // detection_post_stage->add_subscriber(agg_stage);
+    // tracker_stage->add_subscriber(bbox_crop_stage);
+    // bbox_crop_stage->add_subscriber(agg_stage_2);
+    // bbox_crop_stage->add_subscriber(clip_stage);
+    clip_stage->add_subscriber(clip_post_stage);
+    // clip_post_stage->add_subscriber(agg_stage_2);
+    // agg_stage_2->add_subscriber(overlay_stage);
+    agg_stage->add_subscriber(sink_stage);
+    clip_post_stage->add_subscriber(agg_stage);
 }
+
+//TODO: add a documention for this function
+void zmq_subscriber_thread(std::shared_ptr<AppResources>  app_resources)
+{
+    //subscriber for quit message
+    zmq::context_t context(1);
+    zmq::socket_t subscriber(context, ZMQ_SUB);
+
+    // Connect to the ZeroMQ server
+    subscriber.connect("tcp://10.0.0.2:6000"); // Adjust the address and port as needed
+    std::cout << "connected to 10.0.0.2:6000" << std::endl;
+    subscriber.setsockopt(ZMQ_SUBSCRIBE, "", 0);
+    // Infinite loop to receive messages
+    while (true) {
+        // Receive the message
+        zmq::message_t message;
+        subscriber.recv(message, zmq::recv_flags::none);
+
+        // Convert the message to a string
+        std::string received_message(static_cast<char*>(message.data()), message.size());
+
+        // Print the received message
+        std::cout << "Received message: " << received_message << std::endl;
+
+        // Check if the message is "quit"
+        if (received_message == "quit") {
+            std::cout << "Quit message received. Exiting..." << std::endl;
+            stop_app(app_resources);
+            exit(0); 
+        }
+    }
+}
+
+
 /**
  * @brief Main function to initialize and run the application.
  *
@@ -492,7 +523,6 @@ int main(int argc, char *argv[])
 {
     // App resources 
     std::shared_ptr<AppResources> app_resources = std::make_shared<AppResources>();
-    app_resources->frontend_config = FRONTEND_CONFIG_FILE;
 
     // register signal SIGINT and signal handler
     signal_utils::register_signal_handler([app_resources](int signal)
@@ -524,9 +554,6 @@ int main(int argc, char *argv[])
         case ArgumentType::PrintLatency:
             app_resources->print_latency = true;
             break;
-        case ArgumentType::Config:
-            app_resources->frontend_config = result["config-file-path"].as<std::string>();
-            break;
         case ArgumentType::Error:
             return 1;
         }
@@ -544,11 +571,13 @@ int main(int argc, char *argv[])
     // Start pipeline
     start_app(app_resources);
 
-    std::cout << "Using frontend config: " << app_resources->frontend_config << std::endl;
+    std::thread zmq_thread(zmq_subscriber_thread, std::ref(app_resources));
+    zmq_thread.detach();
+
     std::cout << "Started playing for " << timeout << " seconds." << std::endl;
 
     // Wait
-    std::this_thread::sleep_for(std::chrono::seconds(timeout));
+    std::this_thread::sleep_for(std::chrono::minutes(5));
 
     // Stop pipeline
     stop_app(app_resources);
