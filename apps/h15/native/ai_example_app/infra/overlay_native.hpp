@@ -367,32 +367,32 @@ overlay_status_t draw_all(HailoMat &hmat, HailoROIPtr roi, float landmark_point_
         case HAILO_DETECTION:
         {
             HailoDetectionPtr detection = std::dynamic_pointer_cast<HailoDetection>(obj);
+            if(detection -> get_label() != "face"){
+                cv::Scalar color = NO_GLOBAL_ID_COLOR;
+                std::string text = "";
+                if (local_gallery)
+                {
+                    auto global_ids = hailo_common::get_hailo_global_id(detection);
+                    if (global_ids.size() > 1)
+                        std::cerr << "ERROR: more than one global id in roi" << std::endl;
+                    if (global_ids.size() == 1)
+                        color = GLOBAL_ID_COLOR;
+                }
+                else
+                {
+                    color = get_color((size_t)detection->get_class_id());
+                    text = get_detection_text(detection, show_confidence);
+                }
 
-            cv::Scalar color = NO_GLOBAL_ID_COLOR;
-            std::string text = "";
-            if (local_gallery)
-            {
-                auto global_ids = hailo_common::get_hailo_global_id(detection);
-                if (global_ids.size() > 1)
-                    std::cerr << "ERROR: more than one global id in roi" << std::endl;
-                if (global_ids.size() == 1)
-                    color = GLOBAL_ID_COLOR;
+                // Draw Rectangle
+                auto rect = get_rect(hmat, detection, roi);
+                hmat.draw_rectangle(rect, color);
+
+                // Draw text
+                auto text_position = cv::Point(rect.x - log(rect.width), rect.y - log(rect.width));
+                float font_scale = TEXT_FONT_FACTOR * log(rect.width);
+                hmat.draw_text(text, text_position, font_scale, color);
             }
-            else
-            {
-                color = get_color((size_t)detection->get_class_id());
-                text = get_detection_text(detection, show_confidence);
-            }
-
-            // Draw Rectangle
-            auto rect = get_rect(hmat, detection, roi);
-            hmat.draw_rectangle(rect, color);
-
-            // Draw text
-            auto text_position = cv::Point(rect.x - log(rect.width), rect.y - log(rect.width));
-            float font_scale = TEXT_FONT_FACTOR * log(rect.width);
-            hmat.draw_text(text, text_position, font_scale, color);
-
             // Draw inner objects.
             ret = draw_all(hmat, detection, landmark_point_radius, show_confidence, local_gallery, mask_overlay_n_threads);
             break;

@@ -66,8 +66,7 @@ class TappasInstaller(MesonInstaller):
                      '-Dlibxtensor={}'.format(xtensor_base_root),
                      '-Dlibblas={}'.format(xtensor_blas_root),
                      '-Dlibcxxopts={}'.format(cxxopts_root),
-                     '-Dlibrapidjson={}'.format(rapidjson_root),
-                     '-Dinclude_unit_tests=false']
+                     '-Dlibrapidjson={}'.format(rapidjson_root),]
 
         return build_cmd
 

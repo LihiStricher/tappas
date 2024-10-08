@@ -123,7 +123,7 @@ if target in ['all','apps','libs']
     cxxopts_inc = [include_directories(cxxopts_inc_dir, is_system: true)]
 endif
 
-if target in ['all','libs','unit_tests','plugins']
+if target in ['all','libs', 'plugins']
     rapidjson_inc_dir = get_option('librapidjson')
     # rapidjson Include Directories
     rapidjson_inc = [include_directories(rapidjson_inc_dir, is_system: true)]

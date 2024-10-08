@@ -26,6 +26,9 @@ if meson.is_cross_build()
     endif
 endif
 
+# ZMQ dep
+zmq_dep = dependency('libzmq', method : 'pkg-config')
+
 libhailort_dep = [meson.get_compiler('cpp').find_library('hailort', required: false)]
 
 ################################################
@@ -38,7 +41,7 @@ executable('ai_example_app',
   ai_example_app_src,
   cpp_args : hailo_lib_args,
   include_directories:  cxxopts_inc,
-  dependencies : dependencies_apps + [libhailort_dep, opencv_dep, tracker_dep, tappas_general_dep, image_dep],
+  dependencies : dependencies_apps + [libhailort_dep, opencv_dep, tracker_dep, tappas_general_dep, image_dep, zmq_dep],
   gnu_symbol_visibility : 'default',
   install: true,
   install_dir: apps_install_dir + '/ai_example_app',
