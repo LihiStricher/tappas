@@ -211,11 +211,13 @@ void subscribe_elements(std::shared_ptr<AppResources> app_resources)
         if (s.id == AI_SINK)
         {
             std::cout << "subscribing ai pipeline to frontend for '" << s.id << "'" << std::endl;
-            app_resources->pipeline->get_stage_by_name(TILLING_STAGE)->add_queue(s.id);
+            app_resources->pipeline->get_stage_by_name(DETECTION_AI_STAGE)->add_queue(s.id);
+            // app_resources->pipeline->get_stage_by_name(TILLING_STAGE)->add_queue(s.id);
             fe_callbacks[s.id] = [s, app_resources](HailoMediaLibraryBufferPtr buffer, size_t size)
             {
                 BufferPtr wrapped_buffer = std::make_shared<Buffer>(buffer);
-                app_resources->pipeline->get_stage_by_name(TILLING_STAGE)->push(wrapped_buffer, s.id);
+                app_resources->pipeline->get_stage_by_name(DETECTION_AI_STAGE)->push(wrapped_buffer, s.id);
+                // app_resources->pipeline->get_stage_by_name(TILLING_STAGE)->push(wrapped_buffer, s.id);
             };
         }
         else if (s.id == AI_VISION_SINK)
@@ -225,7 +227,7 @@ void subscribe_elements(std::shared_ptr<AppResources> app_resources)
             fe_callbacks[s.id] = [s, app_resources, agg_stage](HailoMediaLibraryBufferPtr buffer, size_t size)
             {                      
                 BufferPtr wrapped_buffer = std::make_shared<Buffer>(buffer);
-                CroppingMetadataPtr cropping_meta = std::make_shared<CroppingMetadata>(TILES.size());
+                CroppingMetadataPtr cropping_meta = std::make_shared<CroppingMetadata>(1);
                 wrapped_buffer->add_metadata(cropping_meta);
                 agg_stage->push(wrapped_buffer, s.id);
             };
@@ -438,7 +440,7 @@ void create_pipeline(std::shared_ptr<AppResources> app_resources)
                                                                                    POST_STAGE, 10, 
                                                                                    true, 0.3, 0.1,
                                                                                    false, app_resources->print_fps);
-    std::shared_ptr<TrackerStage> tracker_stage = std::make_shared<TrackerStage>(TRACKER_STAGE, 1, false, -1, app_resources->print_fps);
+    std::shared_ptr<TrackerStage> tracker_stage = std::make_shared<TrackerStage>(TRACKER_STAGE, 1, false, 1, app_resources->print_fps);
     std::shared_ptr<BBoxCropStage> bbox_crop_stage = std::make_shared<BBoxCropStage>(BBOX_CROP_STAGE, 100, BBOX_CROP_INPUT_WIDTH, BBOX_CROP_INPUT_HEIGHT,
                                                                                     BBOX_CROP_OUTPUT_WIDTH, BBOX_CROP_OUTPUT_HEIGHT,
                                                                                     AGGREGATOR_STAGE_2, CLIP_AI_STAGE, BBOX_CROP_LABEL, 1, false, app_resources->print_fps);
@@ -453,7 +455,7 @@ void create_pipeline(std::shared_ptr<AppResources> app_resources)
     std::shared_ptr<CallbackStage> sink_stage = std::make_shared<CallbackStage>(AI_CALLBACK_STAGE, 1, false);
     
     // Add stages to pipeline
-    app_resources->pipeline->add_stage(tilling_stage);
+    // app_resources->pipeline->add_stage(tilling_stage);
     app_resources->pipeline->add_stage(detection_stage);
     app_resources->pipeline->add_stage(detection_post_stage);
     app_resources->pipeline->add_stage(agg_stage);
@@ -466,7 +468,7 @@ void create_pipeline(std::shared_ptr<AppResources> app_resources)
     app_resources->pipeline->add_stage(clip_post_stage);
 
     // Subscribe stages to each other
-    tilling_stage->add_subscriber(detection_stage);
+    // tilling_stage->add_subscriber(detection_stage);
     detection_stage->add_subscriber(detection_post_stage);
     detection_post_stage->add_subscriber(agg_stage);
     agg_stage->add_subscriber(tracker_stage);
@@ -586,8 +588,7 @@ int main(int argc, char *argv[])
     std::cout << "Started playing for " << timeout << " seconds." << std::endl;
 
     // Wait
-    std::this_thread::sleep_for(std::chrono::seconds(timeout));
-
+    std::this_thread::sleep_for(std::chrono::minutes(5));
     // Stop pipeline
     stop_app(app_resources);
 

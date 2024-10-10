@@ -18,6 +18,7 @@
 #include <mutex>
 #include <thread>
 #include <condition_variable>
+#include <hailo_common.hpp>
 
 // #include "queue.hpp"
 
@@ -37,7 +38,7 @@ std::condition_variable cv;  // Condition variable for waiting
 std::queue<std::vector<float>> m_image_embedding_queue;
 std::queue<std::vector<std::vector<float>>> m_text_embedding_queue;
 std::vector<std::string> prompts;
-std::vector<std::vector<float>> embeddings;
+std::vector<std::vector<float>> text_embeddings;
 
 std::vector<float> probs;
 
@@ -112,12 +113,12 @@ void receive_messages(zmq::socket_t &zmq_subscriber) {
 
         // Parse the embeddings
         if (received_json.contains("embedding") && received_json["embedding"].is_array()) {
-            embeddings.clear(); // Clear the embeddings vector
+            text_embeddings.clear(); // Clear the embeddings vector
             for (const auto& item : received_json["embedding"]) {
                 if (item.is_null()) {
-                    embeddings.push_back({}); 
+                    text_embeddings.push_back({}); 
                 } else {
-                    embeddings.push_back(item.get<std::vector<float>>()); 
+                    text_embeddings.push_back(item.get<std::vector<float>>()); 
                 }
             }
         } else {
@@ -135,7 +136,7 @@ void receive_messages(zmq::socket_t &zmq_subscriber) {
         }
 
         std::lock_guard<std::mutex> lock(text_queue_mutex);  // Lock before pushing
-        m_text_embedding_queue.push(embeddings);
+        m_text_embedding_queue.push(text_embeddings);
     }
 }
 
@@ -207,54 +208,15 @@ std::vector<float> custom_dot_product(const std::vector<float>& A, const std::ve
     return result;
 }
 
-void get_and_send_probs(std::vector<std::vector<float>>& text_embeddings) {
-    while (true) {
-        {
-            std::unique_lock<std::mutex> image_lock(image_queue_mutex); 
+void calc_and_send_probs(std::vector<std::vector<float>>& text_embeddings, std::vector<float>& image_embeddings) {
+    normalize(image_embeddings);
+    normalize_vectors(text_embeddings); 
 
-            if (!m_image_embedding_queue.empty()) {
-                std::vector<float> image_embeddings = m_image_embedding_queue.front();
-                m_image_embedding_queue.pop();
+    std::vector<float> dot_product_result = custom_dot_product(image_embeddings, text_embeddings);
 
-                normalize(image_embeddings);
-                normalize_vectors(text_embeddings); 
+    probs = softmax(dot_product_result);
 
-                std::vector<float> dot_product_result = custom_dot_product(image_embeddings, text_embeddings);
-
-                probs = softmax(dot_product_result);
-
-                send_probs(probs);
-            }
-        } 
-
-        {
-            std::lock_guard<std::mutex> prompt_lock(new_prompt_mutex); 
-            if (new_prompt) {
-                new_prompt = false;
-                break;
-            }
-        }  
-    }
-}
-
-/**
- * @brief calculate the probabilities and send them
- *
- * @param roi 
- */
-void create_and_send_probs() {
-    while (true) {
-        std::unique_lock<std::mutex> lock(text_queue_mutex);  // Lock mutex before accessing the text queue
-
-        if (!m_text_embedding_queue.empty()) {
-            std::vector<std::vector<float>> text_embeddings = m_text_embedding_queue.front();
-            m_text_embedding_queue.pop();
-            
-            get_and_send_probs(text_embeddings);
-        } 
-        lock.unlock();  
-    }
-    std::cout << "out from create_and_send_probs" << std::endl;
+    send_probs(probs);
 }
 
 /**
@@ -262,7 +224,7 @@ void create_and_send_probs() {
  *
  * @param roi 
  */
-void get_image_embedding(HailoROIPtr roi){
+std::vector<float> get_image_embedding(HailoROIPtr roi){
     HailoTensorPtr tensor = roi->get_tensor("clip_resnet_50/conv59");
     if(tensor) {
         std::unique_lock<std::mutex> lock(image_queue_mutex);
@@ -274,11 +236,7 @@ void get_image_embedding(HailoROIPtr roi){
         for (size_t i = 0; i < data_size; ++i) {
             dequantized_data[i] = tensor->fix_scale(data_ptr[i]);
         }
-
-        // push the tensor data
-        m_image_embedding_queue.push(dequantized_data);
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        lock.unlock();
+        return dequantized_data;
     }
 }
 
@@ -291,30 +249,29 @@ void clip(HailoROIPtr roi){
         init_zmq_subscriber("tcp://10.0.0.2:5555");
 
         std::thread subscriber_thread(receive_messages, std::ref(zmq_subscriber)); 
-        std::thread probs_thread(create_and_send_probs);  
 
         subscriber_thread.detach();
-        probs_thread.detach();
         initialization_done = true;
     }
 
-    get_image_embedding(roi);
+    auto image_embedding = get_image_embedding(roi);
+    calc_and_send_probs(text_embeddings, image_embedding);
 
     std::shared_ptr<HailoDetection> detection = std::dynamic_pointer_cast<HailoDetection>(roi);
 
     if(detection){
-        // auto max_prob = std::max_element(probs.begin(), probs.end());
-        // int index = std::distance(probs.begin(), max_prob);
-        // if(prompts.size() > 0){
-        //     // detection -> set_label(prompts[index]);
-        //     // std::cout << "before" << std::endl;
-        //     // std::cout << *max_prob << std::endl;
-        //     // std::cout << "after" << std::endl;
-        //     // std::cout << *max_prob * 100 << std::endl;
-        //     // detection -> set_confidence(*max_prob);
-        // }
+        auto max_prob = std::max_element(probs.begin(), probs.end());
+        int index = std::distance(probs.begin(), max_prob);
+        if(prompts.size() > 0){
+            std::string label = prompts[index];
+            const std::string prefix = "A photo of ";
+            if (label.rfind(prefix, 0) == 0) { 
+                label.erase(0, prefix.length()); 
+            }
+            detection -> set_label(label);
+            detection -> set_confidence(*max_prob);
+        }
     }
-
 }
 
 
